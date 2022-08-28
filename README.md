@@ -9,11 +9,11 @@ Hongbo Sun, Xiangteng He and Yuxin Peng, "SIM-Trans: Structure Information Model
 
 # Dependencies
 
-'Python 3.7.7
+''Python 3.7.7
 
-'PyTorch 1.5.0
+''PyTorch 1.5.0
 
-'Torchvision 0.6.0
+''Torchvision 0.6.0
 
 
 
