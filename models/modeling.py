@@ -22,9 +22,6 @@ import models.configs as configs
 
 
 
-
-
-
 class GraphConvolution(nn.Module):
     def __init__(self, in_features, out_features, bias=False, dropout = 0.1):
         super(GraphConvolution, self).__init__()
@@ -211,16 +208,16 @@ class Embeddings(nn.Module):
 
         self.dropout = Dropout(config.transformer["dropout_rate"])
 
-
-
-
         self.struc_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
         self.relative_coord_predictor = RelativeCoordPredictor()
-
-
+        self.struct_head = nn.Sequential(
+            nn.BatchNorm1d(37*37*2+2),
+            Linear(37*37*2+2, 1024),
+            nn.BatchNorm1d(1024),
+            nn.ELU(inplace=True),
+            Linear(1024, config.hidden_size),
+        )
         self.act_fn = ACT2FN["relu"]
-
-
 
     def get_attn(self, x, y):
         attn = F.normalize(x)*F.normalize(y)
@@ -241,8 +238,6 @@ class Embeddings(nn.Module):
         return structure_info
 
 
-
-
     def forward(self, x):
         B = x.shape[0]
         cls_tokens = self.cls_token.expand(B, -1, -1)
@@ -255,12 +250,11 @@ class Embeddings(nn.Module):
         x = x.flatten(2)
         x = x.transpose(-1, -2)
 
-   
         x = torch.cat((cls_tokens, x), dim=1)
-
 
         embeddings = x + self.position_embeddings
         embeddings = self.dropout(embeddings)
+
         return embeddings, struc_tokens
 
 class Block(nn.Module):
@@ -330,10 +324,9 @@ class Part_Attention(nn.Module):
         last_map = x[0]
         for i in range(1, length):
             last_map = torch.matmul(x[i], last_map)
-            #last_map = last_map + x[i]
+
         last_map = last_map[:,:,0,1:]
         max_value, max_inx = last_map.max(2)
-
 
         B,C = last_map.size(0),last_map.size(1)
         patch_num = last_map.size(-1)
@@ -341,11 +334,6 @@ class Part_Attention(nn.Module):
         H = patch_num ** 0.5
         H = int(H)
         attention_map = last_map.view(B,C,H,H)
-        #attention_map = torch.sum(attention_map, dim=1)
-
-        #print(max_value)
-        #print(max_inx)
-        #print('-------------------')
 
         return last_map, max_inx, max_value, attention_map
 
@@ -360,7 +348,6 @@ class RelativeCoordPredictor(nn.Module):
 
     def forward(self, x):
         N, C, H, W = x.shape
-        #reduced_x = x.view(N, C, H*W).transpose(1, 2).contiguous()  # (N, S, C)
 
         mask = torch.sum(x, dim=1)
         size = H
@@ -376,9 +363,6 @@ class RelativeCoordPredictor(nn.Module):
 
         basic_index = torch.from_numpy(np.array([i for i in range(N)])).cuda()
 
-        #max_features = reduced_x[basic_index, reduced_x_max_index, :]  # (N, C)
-        #max_features_to_concat = max_features.unsqueeze(1).expand((N, H*W, C))
-
         basic_label = torch.from_numpy(self.build_basic_label(size)).float()
         # Build Label
         label = basic_label.cuda()
@@ -390,44 +374,17 @@ class RelativeCoordPredictor(nn.Module):
         relative_angle = torch.atan2(relative_coord[:, :, 1], relative_coord[:, :, 0])  # (N, S) in (-pi, pi)
         relative_angle = (relative_angle / np.pi + 1) / 2  # (N, S) in (0, 1)
 
-
         binary_relative_mask = binary_mask.view(N, H*W)
         relative_dist = relative_dist * binary_relative_mask
         relative_angle = relative_angle * binary_relative_mask
 
-
         basic_anchor = basic_anchor.squeeze(1)                   # (N, 2)
 
-
         relative_coord_total = torch.cat((relative_dist.unsqueeze(2), relative_angle.unsqueeze(2)), dim=-1)
-
-
-
-        '''# Calc Loss
-        preds_dist, preds_angle = preds_coord[:, :, :, 0], preds_coord[:, :, :, 1]
-
-        preds_dist = preds_dist.view(N, H, W)
-        relative_dist = relative_dist.view(N, H, W)
-        dist_loss = self.dist_loss_f(preds_dist, relative_dist)
-
-        preds_angle = preds_angle.view(N, H*W)
-        gap_angle = preds_angle - relative_angle  # (N, S) in (0, 1) - (0, 1) = (-1, 1)
-        gap_angle[gap_angle < 0] += 1
-        gap_angle = gap_angle - torch.mean(gap_angle, dim=-1, keepdim=True)  # (N, H*W)
-        gap_angle = gap_angle.view(N, H, W)
-        angle_loss = torch.pow(gap_angle, 2)
-        '''
-
 
         position_weight = torch.mean(masked_x, dim=-1)
         position_weight = position_weight.unsqueeze(2)
         position_weight = torch.matmul(position_weight, position_weight.transpose(1,2))
-
-
-        #relative_coord_total = relative_coord_total.half()
-        #position_weight = position_weight.half()
-
-        
 
         return relative_coord_total, basic_anchor, position_weight, reduced_x_max_index
     
@@ -454,14 +411,15 @@ class GCN(nn.Module):
 class Part_Structure(nn.Module):
     def __init__(self, config):
         super(Part_Structure, self).__init__()
-
+        self.fc1 = Linear(37*37*2+2, config.hidden_size)
         self.act_fn = ACT2FN["relu"]
         self.dropout = Dropout(config.transformer["dropout_rate"])
         self.relative_coord_predictor = RelativeCoordPredictor()
 
-
-
-
+        self.struct_head = nn.Sequential(
+            nn.BatchNorm1d(37*37*2+2),
+            Linear(37*37*2+2, config.hidden_size),
+        )
 
         self.struct_head_new = nn.Sequential(
             nn.BatchNorm1d( config.hidden_size*2 ),
@@ -471,15 +429,12 @@ class Part_Structure(nn.Module):
             Linear(1024, config.hidden_size),
         )
 
-
         self.gcn =  GCN(2, 512, config.hidden_size, dropout=0.1)
-
 
     def forward(self, hidden_states, part_inx, part_value, attention_map, struc_tokens):
 
         B,C,H,W = attention_map.shape
         structure_info, basic_anchor, position_weight, reduced_x_max_index = self.relative_coord_predictor(attention_map)
-
         structure_info = self.gcn(structure_info, position_weight)
 
         for i in range(B):
@@ -487,7 +442,6 @@ class Part_Structure(nn.Module):
 
             hidden_states[i,0] = hidden_states[i,0] + structure_info[i, index, :]
 
-     
         return hidden_states
 
 
@@ -517,7 +471,6 @@ class Encoder(nn.Module):
             hidden_states, weights = layer(hidden_states)
             attn_weights.append(weights)
             
-
             if i > 8:
                 temp_weight = []
                 temp_weight.append(weights)
@@ -527,23 +480,13 @@ class Encoder(nn.Module):
 
                 hid_ori.append(self.part_norm(hidden_states[:,0])) 
 
-
-
-
         part_states, part_weights = self.part_layer(hidden_states)
-
-
         attn_weights.append(part_weights)
-
         temp_weight = []
         temp_weight.append(part_weights)
-
         _, part_inx, part_value, a_map = self.part_select(temp_weight)
         part_states = self.part_structure(part_states, part_inx, part_value, a_map, struc_tokens)
-
         part_encoded = self.part_norm(part_states)   
-
-
 
         return part_encoded, hid_ori
 
@@ -567,9 +510,6 @@ class VisionTransformer(nn.Module):
         self.zero_head = zero_head
         self.classifier = config.classifier
         self.transformer = Transformer(config, img_size)
-        #self.part_head = Linear(config.hidden_size, num_classes)
-
-
 
         self.part_head = nn.Sequential(
             nn.BatchNorm1d(config.hidden_size*3),
@@ -579,13 +519,10 @@ class VisionTransformer(nn.Module):
             Linear(1024, num_classes),
         )
 
-
     def forward(self, x, labels=None, step=0, global_step=10000):
         part_tokens, hid = self.transformer(x)
 
-
         final_hid = torch.cat((hid[-2], hid[-1], part_tokens[:,0]), dim=-1)
-
         part_logits = self.part_head(final_hid)
 
         if labels is not None:
@@ -594,21 +531,11 @@ class VisionTransformer(nn.Module):
             else:
                 loss_fct = LabelSmoothing(self.smoothing_value)
             
-            
-            
             part_loss = loss_fct(part_logits.view(-1, self.num_classes), labels.view(-1))
-            
-            
             
             contrast_loss = con_loss_new(part_tokens[:,0], labels.view(-1), step, global_step)
 
-
-
-
             loss = part_loss + contrast_loss
-
-
-
 
             return loss, part_logits
         else:
@@ -663,50 +590,12 @@ class VisionTransformer(nn.Module):
                     for uname, unit in block.named_children():
                         unit.load_from(weights, n_block=bname, n_unit=uname) 
 
-def stru_loss(structure):
-
-    struc = torch.stack(structure, 0)
-
-    #print(struc.shape)
-
-    struc = struc.transpose(0,1).contiguous()
-    B,C,L = struc.shape
-
-    gap = struc - torch.mean(struc, dim=1, keepdim=True)
-    gap = gap.contiguous().view(B, C*L)
-    gap = torch.pow(gap, 2)
-    loss = gap.sum()/(B*L)
-
-
-
-    return loss
-
-
-def con_loss(features, labels):
-    B, _ = features.shape
-    features = F.normalize(features)
-    cos_matrix = features.mm(features.t())
-    pos_label_matrix = torch.stack([labels == labels[i] for i in range(B)]).float()
-    neg_label_matrix = 1 - pos_label_matrix
-    pos_cos_matrix = 1 - cos_matrix
-    neg_cos_matrix = cos_matrix - 0.4
-    neg_cos_matrix[neg_cos_matrix < 0] = 0
-    loss = (pos_cos_matrix * pos_label_matrix).sum() + (neg_cos_matrix * neg_label_matrix).sum()
-    loss /= (B * B)
-    return loss
-
-
-
-
 def cosine_anneal_schedule(t, nb_epoch, lr):
     cos_inner = np.pi * (t % (nb_epoch))  # t - 1 is used when t has 1-based indexing.
     cos_inner /= (nb_epoch)
     cos_out = np.cos(cos_inner) + 1
 
     return float(lr / 2 * cos_out)
-
-
-
 
 def con_loss_new(features, labels, step, global_step,):
     eps = 1e-6
@@ -723,41 +612,24 @@ def con_loss_new(features, labels, step, global_step,):
     pos_cos_matrix = 1 - cos_matrix
     neg_cos_matrix =1 + cos_matrix
   
-
     margin = 0.3
-
 
     sim = (1 + cos_matrix)/2.0
     scores = 1 - sim
-
 
     positive_scores = torch.where(pos_label_matrix == 1.0, scores, scores-scores)
     mask = torch.eye(features.size(0)).cuda()
     positive_scores = torch.where(mask == 1.0, positive_scores - positive_scores, positive_scores)
 
-    #print(positive_scores)
-    #print(torch.sum(positive_scores, dim=1, keepdim=True))
-    #print(torch.sum(pos_label_matrix, dim=1, keepdim=True)-1)
-
     positive_scores = torch.sum(positive_scores, dim=1, keepdim=True)/((torch.sum(pos_label_matrix, dim=1, keepdim=True)-1)+eps)
     positive_scores = torch.repeat_interleave(positive_scores, B, dim=1)
-    
-    #print(positive_scores)
 
     relative_dis1 = margin + positive_scores -scores
     neg_label_matrix_new[relative_dis1 < 0] = 0
     neg_label_matrix = neg_label_matrix*neg_label_matrix_new
-    
-    #print(neg_label_matrix)
-
-
 
     loss = (pos_cos_matrix * pos_label_matrix).sum() + (neg_cos_matrix * neg_label_matrix).sum()
     loss /= B*B
-
-    #print(loss)
-
-    #print('---------------------')
 
     return loss
 
