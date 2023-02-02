@@ -29,7 +29,7 @@ Start training by executing the following commands. This will train the model on
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --master_port 10715 --nproc_per_node=4 train.py --dataset CUB_200_2011 --split overlap --num_steps 10000  --eval_every 1000 --fp16 --name sample_run --train_batch_size 5
 
-For any questions, fell free to contact us (sunhongbo@pku.edu.cn).
+For any questions, feel free to contact us (sunhongbo@pku.edu.cn).
 
 Welcome to our [Laboratory Homepage](http://www.icst.pku.edu.cn/mipl/home/) for more information about our papers, source codes, and datasets.
 
